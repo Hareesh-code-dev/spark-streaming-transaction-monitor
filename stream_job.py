@@ -9,10 +9,12 @@ schema = StructType() \
     .add("amount", DoubleType()) \
     .add("timestamp", TimestampType())
 
+# Read the simulated transaction stream
 df = spark.readStream \
     .schema(schema) \
     .json("/Volumes/workspace/default/data_stream/")
 
+# Windowed aggregation with watermarking to handle late-arriving data
 agg = df.withWatermark("timestamp", "2 minutes") \
     .groupBy(
         window(col("timestamp"), "1 minute"),
@@ -23,14 +25,22 @@ agg = df.withWatermark("timestamp", "2 minutes") \
         count("*").alias("txn_count")
     )
 
+# Flag accounts with high transaction volume in a 1-minute window (velocity-based fraud signal)
 flagged = agg.filter(col("total_amount") > 5000)
 
+# Write flagged results to a Delta table
+delta_output_path = "/Volumes/workspace/default/data_stream/delta_output"
+checkpoint_path = "/Volumes/workspace/default/data_stream/_checkpoint_delta"
+
 query = flagged.writeStream \
-    .outputMode("update") \
-    .format("console") \
-    .option("truncate", False) \
-    .option("checkpointLocation", "/Volumes/workspace/default/data_stream/_checkpoint") \
+    .outputMode("append") \
+    .format("delta") \
+    .option("checkpointLocation", checkpoint_path) \
     .trigger(availableNow=True) \
-    .start()
+    .start(delta_output_path)
 
 query.awaitTermination()
+
+# Verify output
+df_check = spark.read.format("delta").load(delta_output_path)
+display(df_check)
